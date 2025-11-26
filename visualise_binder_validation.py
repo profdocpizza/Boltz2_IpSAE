@@ -409,7 +409,7 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
     # Add the binder_sequence column
     all_df["binder_sequence"] = all_df["binder_short"].map(binder_sequences)
 
-    metrics = [m for m in ["ipSAE_min"] if m in all_df.columns]
+    metrics = [m for m in ["ipSAE_min", "ipSAE_max"] if m in all_df.columns]
     if not metrics:
         print("No ipSAE_min/ipSAE_max metrics found for heatmap plotting.")
         return
