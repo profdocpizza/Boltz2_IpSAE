@@ -1,12 +1,3 @@
-# thresholds to pass: self < 0.1 , target > 0.2, antitarget < 0.1
-
-# then write 
-# >binder_short
-# binder_sequence
-# as binder_short.fasta file in given dir
-
-# control everythign with arguments --root_dir, --output_dir, --self_threshold, --target_threshold, --antitarget_threshold with defaults
-
 import argparse
 import os
 import pandas as pd

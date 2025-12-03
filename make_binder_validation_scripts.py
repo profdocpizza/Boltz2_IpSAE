@@ -493,6 +493,7 @@ def main():
 
     # Boltz defaults
     boltz_cfg = get_global_option(cfg, "boltz", default={}) or {}
+    print(f"Boltz global config: {boltz_cfg}")
     recycling_steps = boltz_cfg.get("recycling_steps", 10)
     diffusion_samples = boltz_cfg.get("diffusion_samples", 5)
     use_msa_server_mode = str(boltz_cfg.get("use_msa_server", "auto")).lower()
