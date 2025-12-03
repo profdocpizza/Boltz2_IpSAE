@@ -4,7 +4,6 @@ version: 1
 output_dir: ./boltz_validation
 
 global:
-  add_n_terminal_lysine: false
   boltz:
     recycling_steps: 10
     diffusion_samples: 5
@@ -13,11 +12,11 @@ global:
 visualisation:
   ipsae_error_threshold: 15
   ipsae_distance_threshold: 15
-  use_best_model: false
+  use_best_model: false # plots avg across all models if false
   num_cpu: 50
 
 binders:
-  - from_dir: known_binders/
+  - from_dir: binders/
 
 targets:
   - name: nipah_g
