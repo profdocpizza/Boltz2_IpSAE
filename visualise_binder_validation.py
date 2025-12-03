@@ -32,12 +32,8 @@ This script:
 """
 
 import argparse
-from fileinput import filename
-import subprocess
 import re
-import os
 import pandas as pd
-import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from pathlib import Path
