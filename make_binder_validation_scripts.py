@@ -299,7 +299,12 @@ def parse_chains_msa(entry: Dict[str, Any], n_chains: int) -> List[Optional[str]
             raise ValueError(f"chains_msa key must be an integer index, got {k!r}")
         if 0 <= idx < n_chains:
             if v is not None:
-                msas[idx] = str(v)
+                p = Path(v)
+                # If relative and exists, convert to absolute path
+                if not p.is_absolute() and p.exists():
+                    p = p.resolve()
+                msas[idx] = str(p)
+
         else:
             print(f"WARNING: chains_msa index {idx} out of range for {n_chains} chains; ignoring.")
     return msas

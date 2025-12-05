@@ -2,6 +2,9 @@
 
 This repository contains scripts for co-folding using Boltz2, calculating and visualising [ipSAE](https://github.com/DunbrackLab/IPSAE) metric. With a single .yaml file you can cofold your binder to multiple targets and itself to monitor specificity of binding.
 
+![Example output](images/ipSAE_min_heatmap.png)
+
+
 ## How to Run
 
 1.  **Clone the repository and set up the [`Boltz2`](https://github.com/jwohlwend/boltz) environment.**
@@ -24,7 +27,7 @@ This repository contains scripts for co-folding using Boltz2, calculating and vi
     ```
 
 5.  **When co-folding is done, visualize the results:**
-
+a
     ```bash
     ./boltz_validation/visualise_cofolding_results.sh
     ```
