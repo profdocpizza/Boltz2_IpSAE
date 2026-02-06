@@ -7,7 +7,7 @@ global:
   boltz:
     recycling_steps: 10
     diffusion_samples: 5
-    use_msa_server: auto
+    use_msa_server: true
 
 visualisation:
   ipsae_error_threshold: 15
@@ -17,7 +17,9 @@ visualisation:
 
 binders:
   - from_dir: binders/
-
+    chains_msa:
+      0: empty
+      1: empty
 targets:
   - name: nipah_g
     role: target
@@ -29,5 +31,10 @@ targets:
     role: antitarget
     sequences:
       - GSMASLPVLQKESVFQSGAHAYRIPALLYLPGQQSLLAFAEQRASKKDEHAELIVLRRGDYDAPTHQVQWQAQEVVAQARLDGHRSMNPCPLYDAQTGTLFLFFIAIPGQVTEQQQLETRANVTRLCQVTSTDHGRTWSSPRDLTDAAIGPAYREWSTFAVGPGHCLQLNDRARSLVVPAYAYRKLHPIQRPIPSAFCFLSHDHGRTWARGHFVAQDTLECQVAEVETGEQRVVTLNARSHLRARVQAQSTNDGLDFQESQLVKKLVEPPPQGCQGSVISFPSPRSGPGSPAQWLLYTHPTHSWQRADLGAYLNPRPPAPEAWSEPVLLAKGSCAYSDLQSMGTGPDGSPLFGCLYEANDYEEIVFLMFTLKQAFPAEYLPQ
+    chains_msa:
+      0: empty
   - name: self
     role: self
+    chains_msa:
+      0: empty
+      1: empty

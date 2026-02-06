@@ -133,6 +133,7 @@ def yaml_for_pair(
     binder_seqs: List[str],
     partner_seqs: List[str],
     partner_role: str,
+    use_msa_server: bool,
     binder_msas: Optional[List[Optional[str]]] = None,
     partner_msas: Optional[List[Optional[str]]] = None,
 ) -> str:
@@ -145,17 +146,11 @@ def yaml_for_pair(
           antitarget → AA, AB, ...
           other      → PA, PB, ...
 
-    If any MSA is provided for binder or partner chains, then EVERY chain gets
-    an 'msa:' entry. Chains without a file get 'msa: empty'.
-
-    YAML format for Boltz stays:
-
-        version: 1
-        sequences:
-          - protein:
-              id: ...
-              sequence: ...
-              msa: <optional field>
+    Logic for MSAs:
+      - If user provided a path (chains_msa), ALWAYS write 'msa: <path>'.
+      - If user did NOT provide a path:
+         - if use_msa_server=False: write 'msa: empty'
+         - if use_msa_server=True:  do NOT write 'msa: ...' (let Boltz fetch it)
     """
 
     lines: List[str] = ["version: 1", "sequences:"]
@@ -163,14 +158,24 @@ def yaml_for_pair(
     binder_msas = binder_msas or [None] * len(binder_seqs)
     partner_msas = partner_msas or [None] * len(partner_seqs)
 
+    # Helper
+    def _add_msa_field(msa_opt: Optional[str]):
+        if msa_opt:
+            lines.append(f"      msa: {msa_opt}")
+        else:
+            # No user-provided MSA
+            if not use_msa_server:
+                lines.append("      msa: empty")
+
     # --- Binder chains (A, B, ...) ---
     for i, seq in enumerate(binder_seqs):
         cid = chr(ord("A") + i)
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
-        msa_path = binder_msas[i] if i < len(binder_msas) and binder_msas[i] else "empty"
-        lines.append(f"      msa: {msa_path}")
+        
+        msa_val = binder_msas[i] if i < len(binder_msas) else None
+        _add_msa_field(msa_val)
 
     # --- Partner chains (TA/TB/... or AA/AB/...) ---
     for i, seq in enumerate(partner_seqs):
@@ -178,8 +183,9 @@ def yaml_for_pair(
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
-        msa_path = partner_msas[i] if i < len(partner_msas) and partner_msas[i] else "empty"
-        lines.append(f"      msa: {msa_path}")
+        
+        msa_val = partner_msas[i] if i < len(partner_msas) else None
+        _add_msa_field(msa_val)
 
     return "\n".join(lines) + "\n"
 
@@ -326,17 +332,23 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ValueError("Each binder entry must be a mapping.")
 
-        # Case: from_dir (NO MSAs)
+        # Case: from_dir
         if "from_dir" in entry:
             dir_path = Path(entry["from_dir"]).resolve()
             if not dir_path.is_dir():
                 raise ValueError(f"Binder from_dir not found: {dir_path}")
             addK = bool(entry.get("add_n_terminal_lysine", global_addK))
+            
+            # Allow chains_msa even for from_dir (to set default MSA for all binders found)
+            # We defer parsing until we know n_chains for each binder found.
+            
             for name, seqs in read_fasta_dir_entities(dir_path):
                 if addK:
                     seqs = add_n_terminal_lysine(seqs)
-                # from_dir entries: explicitly NO MSAs
-                msas = [None] * len(seqs)
+                
+                # Try to parse chains_msa for THIS specific binder
+                msas = parse_chains_msa(entry, len(seqs))
+                
                 result.append(
                     {"name": sanitize_name(name), "seqs": seqs, "msas": msas}
                 )
@@ -429,9 +441,16 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"Target {name}: invalid role {role!r} (expected 'target', 'antitarget', or 'self')."
             )
         if role == "self":
-            seqs = []   # placeholder to indicate "binder will fill this"
-            msas = []   # placeholder for binder MSAs
-            result.append({"name": name, "role": "self", "seqs": seqs, "msas": msas})
+            # For self, we need to capture chains_msa config if present, 
+            # effectively deferring msa resolution until we know the binder.
+            # We store the raw 'entry' dict to parse later.
+            result.append({
+                "name": name, 
+                "role": "self", 
+                "seqs": [], 
+                "msas": [], 
+                "_raw_entry_for_msa": entry
+            })
             continue
 
         # Sequences source: either 'sequences' or 'fasta'
@@ -501,10 +520,15 @@ def main():
     print(f"Boltz global config: {boltz_cfg}")
     recycling_steps = boltz_cfg.get("recycling_steps", 10)
     diffusion_samples = boltz_cfg.get("diffusion_samples", 5)
-    use_msa_server_mode = str(boltz_cfg.get("use_msa_server", "auto")).lower()
-    if use_msa_server_mode not in {"auto", "true", "false"}:
-        sys.exit("ERROR: global.boltz.use_msa_server must be 'auto', 'true', or 'false'.")
 
+    # Validation: use_msa_server must be strictly true/false
+    raw_msa_mode = str(boltz_cfg.get("use_msa_server", "false")).lower()
+    if raw_msa_mode == "true":
+        use_msa_server = True
+    elif raw_msa_mode == "false":
+        use_msa_server = False
+    else:
+        sys.exit("ERROR: global.boltz.use_msa_server must be 'true' or 'false'.")
 
     # --- Generate YAMLs and run.sh for each binder ---
     for binder in binders:
@@ -516,7 +540,6 @@ def main():
         binder_dir.mkdir(parents=True, exist_ok=True)
 
         yaml_paths: List[Path] = []
-        any_pair_uses_msa = False
 
         # Loop over ALL partner entities (targets, antitargets, self)
         for tgt in targets_all:
@@ -527,7 +550,36 @@ def main():
             if role == "self":
                 partner_name = "self"
                 tseqs = bseqs[:]              # copy binder seqs
-                tmsas = bmsas[:]              # copy binder MSAs
+                
+                # If the self entry defines chains_msa, use it.
+                # Otherwise, fallback to binder's own MSAs (default behavior).
+                if "_raw_entry_for_msa" in tgt:
+                     # Attempt to parse MSAs for the target side using binder sequence length
+                    self_msas = parse_chains_msa(tgt["_raw_entry_for_msa"], len(tseqs))
+                    # If parsing resulted in ANY non-None entries, use them. 
+                    # Note: parse_chains_msa returns [None, None...] if nothing found.
+                    # BUT here the user might explicitly map "0: empty".
+                    # parse_chains_msa handles "empty" as a string value for the path if resolved? 
+                    # Wait, parse_chains_msa logic: if v is not None -> resolves path.
+                    # It doesn't seem to inherently support string "empty" unless it's a file path?
+                    # Actually, boltz config accepts "empty" as a specific keyword for ignoring MSAs.
+                    # Let's check parse_chains_msa again.
+                    
+                    # Correction: parse_chains_msa resolves paths. 
+                    # If the user put "empty" in config, `Path("empty").resolve()` points to a file named empty in CWD.
+                    # That is NOT what we want if "empty" is a keyword.
+                    # However, let's treat it generically: whatever parse_chains_msa returns.
+                    # If user provided chains_msa, we should respect it.
+                    
+                    # If config has chains_msa, we prefer it over bmsas.
+                    # We check if the raw entry has "chains_msa" key.
+                    if "chains_msa" in tgt["_raw_entry_for_msa"]:
+                         tmsas = self_msas
+                    else:
+                         tmsas = bmsas[:]
+                else:
+                    tmsas = bmsas[:]              # copy binder MSAs
+                
                 yaml_name = f"binder_{bname}_vs_self.yaml"
 
             # --- NORMAL TARGET ---
@@ -552,22 +604,12 @@ def main():
                 bseqs,
                 tseqs,
                 partner_role=role,
+                use_msa_server=use_msa_server,
                 binder_msas=bmsas,
                 partner_msas=tmsas,
             )
             write_text(ypath, text)
             yaml_paths.append(ypath)
-
-            if any(bmsas) or any(tmsas):
-                any_pair_uses_msa = True
-
-        # Decide whether to use MSA server
-        if use_msa_server_mode == "true":
-            use_msa_server = True
-        elif use_msa_server_mode == "false":
-            use_msa_server = False
-        else:
-            use_msa_server = not any_pair_uses_msa
 
         make_run_sh(
             binder_dir,
