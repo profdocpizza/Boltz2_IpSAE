@@ -32,11 +32,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-
-try:
-    import yaml
-except ImportError:
-    sys.exit("ERROR: PyYAML is required. Install with `pip install pyyaml`.")
+from str2fasta import get_sequences_all_chains
+import yaml
 
 SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -332,14 +329,14 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ValueError("Each binder entry must be a mapping.")
 
-        # Case: from_dir
-        if "from_dir" in entry:
-            dir_path = Path(entry["from_dir"]).resolve()
+        # Case: from_dir (renamed to from_fasta_dir)
+        if "from_fasta_dir" in entry:
+            dir_path = Path(entry["from_fasta_dir"]).resolve()
             if not dir_path.is_dir():
-                raise ValueError(f"Binder from_dir not found: {dir_path}")
+                raise ValueError(f"Binder from_fasta_dir not found: {dir_path}")
             addK = bool(entry.get("add_n_terminal_lysine", global_addK))
             
-            # Allow chains_msa even for from_dir (to set default MSA for all binders found)
+            # Allow chains_msa even for from_fasta_dir (to set default MSA for all binders found)
             # We defer parsing until we know n_chains for each binder found.
             
             for name, seqs in read_fasta_dir_entities(dir_path):
@@ -351,6 +348,74 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 
                 result.append(
                     {"name": sanitize_name(name), "seqs": seqs, "msas": msas}
+                )
+            continue
+            
+        # Case: from_structure_dir
+        if "from_structure_dir" in entry:
+            dir_path = Path(entry["from_structure_dir"]).resolve()
+            if not dir_path.is_dir():
+                raise ValueError(f"Binder from_structure_dir not found: {dir_path}")
+            
+            # Parse chains if specified
+            chains_to_keep = None
+            if "chains" in entry:
+                # Expecting "A,B" string or list ["A", "B"]
+                raw_chains = entry["chains"]
+                if isinstance(raw_chains, str):
+                    chains_to_keep = {c.strip() for c in raw_chains.split(",") if c.strip()}
+                elif isinstance(raw_chains, list):
+                    chains_to_keep = {str(c).strip() for c in raw_chains if str(c).strip()}
+            
+            addK = bool(entry.get("add_n_terminal_lysine", global_addK))
+
+            # Iterate over structures
+            for struct_path in sorted(dir_path.glob("*")):
+                if not struct_path.is_file():
+                    continue
+                if struct_path.suffix.lower() not in {".pdb", ".cif", ".ent"}:
+                    continue
+                
+                # Use str2fasta to get all chains
+                try:
+                    chain_seqs_map = get_sequences_all_chains(str(struct_path))
+                except Exception as e:
+                    print(f"Warning: failed to parse {struct_path.name}: {e}")
+                    continue
+                
+                # Filter chains
+                if chains_to_keep is not None:
+                    ordered_chains = []
+                    if "chains" in entry:
+                        raw_chains = entry["chains"]
+                        if isinstance(raw_chains, str):
+                            ordered_chains = [c.strip() for c in raw_chains.split(",") if c.strip()]
+                        elif isinstance(raw_chains, list):
+                            ordered_chains = [str(c).strip() for c in raw_chains if str(c).strip()]
+                    
+                    final_seqs = []
+                    for cid in ordered_chains:
+                        if cid in chain_seqs_map:
+                            final_seqs.append(chain_seqs_map[cid])
+                        else:
+                            # If a requested chain is missing, skip or warn?
+                            # For now, let's warn and skip that chain
+                            print(f"Warning: Chain {cid} not found in {struct_path.name}")
+                else:
+                    # No chains specified, take all chains
+                    final_seqs = list(chain_seqs_map.values())
+                
+                if not final_seqs:
+                    continue
+
+                if addK:
+                    final_seqs = add_n_terminal_lysine(final_seqs)
+                
+                name = sanitize_name(struct_path.stem)
+                msas = parse_chains_msa(entry, len(final_seqs))
+                
+                result.append(
+                    {"name": name, "seqs": final_seqs, "msas": msas}
                 )
             continue
 

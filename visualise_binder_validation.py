@@ -464,20 +464,50 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
     # ------------------------------------------------------
     # PLOT HEATMAPS (BOTH USING ipSAE_min-BASED ORDERING)
     # ------------------------------------------------------
-    for metric in metrics:
-        # ----------------------------------------------------------
-        # Replace partner names with their class
-        agg["partner_class"] = agg["partner"].map(type_map)
+    # Define order of partners on Y-axis
+    # We want: targets first, then self, then antitargets (or similar logic).
+    
+    unique_types = ["target", "self", "antitarget"]
+    partners_by_type = {t: [] for t in unique_types}
+    partners_by_type["unknown"] = []
+    
+    # Get all partners from agg_base (which has 'partner' and 'target_type')
+    unique_partners = agg_base[["partner", "target_type"]].drop_duplicates()
 
-        pivot = agg.pivot(index="partner_class", columns="binder_short", values=metric)
-        pivot = pivot.reindex(index=partner_order, columns=binder_order)
+    for _, row in unique_partners.iterrows():
+        ptype = row["target_type"]
+        pname = row["partner"]
+        if ptype in partners_by_type:
+            partners_by_type[ptype].append(pname)
+        else:
+            partners_by_type["unknown"].append(pname)
+
+    # Convert mapping to a flat list in order
+    final_partner_order = []
+    for t in unique_types + ["unknown"]:
+        # sort alphabetically within each group
+        final_partner_order.extend(sorted(partners_by_type[t]))
+
+    print(f"Partner order for heatmap: {final_partner_order}")
+
+    for metric in metrics:
+        # Use specific 'partner' name instead of class
+        # Note: if multiple rows match (binder_short, partner), pivot fails unless aggregated.
+        # We already aggregated into 'agg' above by mean().
+        
+        pivot = agg.pivot(index="partner", columns="binder_short", values=metric)
+        
+        # Reindex to enforce our sorted order (Target -> Self -> Antitarget)
+        # Filter out any partners that might be missing from pivot (shouldn't happen but safe)
+        valid_order = [p for p in final_partner_order if p in pivot.index]
+        pivot = pivot.reindex(index=valid_order, columns=binder_order)
 
         plt.figure(figsize=(max(7, len(binder_order) * 0.7),
-                            max(5, len(partner_order) * 0.4)))
+                            max(5, len(valid_order) * 0.4)))
         sns.heatmap(
             pivot,
             annot=True,
-            fmt=".3f",
+            fmt=".2f",
             cmap="viridis",
             cbar_kws={"label": metric},
             linewidths=0.5,
@@ -485,7 +515,7 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
             vmax=1,
         )
         plt.title(metric)
-        plt.ylabel("Self / Target / Antitarget ", rotation=90)
+        plt.ylabel("Partner", rotation=90)
         plt.xlabel("Binder")
         plt.yticks(rotation=0)
         # plt.tight_layout()
