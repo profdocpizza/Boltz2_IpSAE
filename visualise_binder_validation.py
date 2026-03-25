@@ -317,10 +317,11 @@ def _kabsch_rmsd(mobile: np.ndarray, reference: np.ndarray) -> float:
 
     cov = mob_centered.T @ ref_centered
     u, _s, vt = np.linalg.svd(cov)
-    rot = vt.T @ u.T
+    # Row-vector convention: X_aligned = X @ R with R = U @ Vt.
+    rot = u @ vt
     if np.linalg.det(rot) < 0:
-        vt[-1, :] *= -1
-        rot = vt.T @ u.T
+        u[:, -1] *= -1
+        rot = u @ vt
 
     mob_aligned = mob_centered @ rot
     return float(np.sqrt(np.mean(np.sum((mob_aligned - ref_centered) ** 2, axis=1))))
