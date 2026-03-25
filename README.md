@@ -41,6 +41,14 @@ You can add ligands directly in config entries:
 - `binders[*].ligand_ccd` / `binders[*].ligand_smiles`
 - `targets[*].ligand_ccd` / `targets[*].ligand_smiles` (only when `role` is `target` or `antitarget`)
 
-Each key accepts a single string or a list. Repeated ligand values are grouped into one Boltz ligand entity with multiple chain IDs (for example `id: [C, D]`).
+Each key accepts a single string or a list. Repeated ligand values are grouped into one Boltz ligand entity with multiple chain IDs (for example `id: [LA, LB]`).
 
 For `targets[*].role: self`, ligand keys are not allowed; self runs inherit ligands from the binder entry.
+
+## Optional monomer RMSD column
+
+Set `visualisation.RMSD_to_binder_monomer: true` to:
+
+- generate an extra binder-only monomer Boltz prediction per binder (same global Boltz params as pair runs),
+- compute RMSD from each binder-vs-* model to all binder monomer models (average across monomer samples),
+- append this value to existing rows as `RMSD_to_binder_monomer` in `summary/ipsae_summary_all_binders.csv`.

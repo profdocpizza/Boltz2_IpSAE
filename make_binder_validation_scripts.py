@@ -271,7 +271,7 @@ def yaml_for_pair(
     if all_ligands:
         ligand_ids = _allocate_ligand_chain_ids(len(all_ligands), used_chain_ids)
 
-        # Group repeated ligands into one entry with id: [C, D, ...]
+        # Group repeated ligands into one entry with id: [LA, LB, ...]
         grouped_ids: Dict[Tuple[str, str], List[str]] = {}
         ligand_order: List[Tuple[str, str]] = []
         for lig, cid in zip(all_ligands, ligand_ids):
@@ -358,10 +358,16 @@ def make_visualisation_sh(output_root: Path, cfg: Dict[str, Any]) -> None:
     ipsae_d = viz_cfg.get("ipsae_distance_threshold", 15)
     use_best = viz_cfg.get("use_best_model", True)
     num_cpu = viz_cfg.get("num_cpu", None)
+    rmsd_to_monomer = parse_bool_option(
+        viz_cfg.get("RMSD_to_binder_monomer", False),
+        "visualisation.RMSD_to_binder_monomer",
+        default=False,
+    )
 
     # Flags
     best_flag = "--use_best_model" if use_best else ""
     cpu_flag = f"--num_cpu {num_cpu}" if num_cpu is not None else ""
+    rmsd_flag = "--rmsd_to_binder_monomer" if rmsd_to_monomer else ""
 
     script_line = (
         f"python {os.path.dirname(os.path.abspath(__file__))}/visualise_binder_validation.py "
@@ -369,7 +375,7 @@ def make_visualisation_sh(output_root: Path, cfg: Dict[str, Any]) -> None:
         f"--ipsae_d {ipsae_d} "
         f"{cpu_flag} "
         f"--root_dir {output_root} "
-        f"--generate_data --plot {best_flag}"
+        f"--generate_data --plot {best_flag} {rmsd_flag}"
     ).strip()
 
     sh_path = output_root / "visualise_cofolding_results.sh"
@@ -399,6 +405,21 @@ def get_global_option(cfg: Dict[str, Any], *keys, default=None):
             return default
         node = node.get(k, default)
     return node
+
+
+def parse_bool_option(raw: Any, key_name: str, default: bool = False) -> bool:
+    """Parse bool-like config value with strict validation."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        if v in {"true", "yes", "1"}:
+            return True
+        if v in {"false", "no", "0"}:
+            return False
+    raise ValueError(f"{key_name} must be a boolean (true/false).")
 
 
 def parse_chains_msa(entry: Dict[str, Any], n_chains: int) -> List[Optional[str]]:
@@ -733,6 +754,12 @@ def main():
     print(f"Boltz global config: {boltz_cfg}")
     recycling_steps = boltz_cfg.get("recycling_steps", 10)
     diffusion_samples = boltz_cfg.get("diffusion_samples", 5)
+    viz_cfg = cfg.get("visualisation", {}) or {}
+    run_binder_monomer = parse_bool_option(
+        viz_cfg.get("RMSD_to_binder_monomer", False),
+        "visualisation.RMSD_to_binder_monomer",
+        default=False,
+    )
 
     # Validation: use_msa_server must be strictly true/false
     raw_msa_mode = str(boltz_cfg.get("use_msa_server", "false")).lower()
@@ -754,6 +781,24 @@ def main():
         binder_dir.mkdir(parents=True, exist_ok=True)
 
         yaml_paths: List[Path] = []
+
+        # Optional binder-only monomer run (used for RMSD reference in visualisation).
+        if run_binder_monomer:
+            monomer_yaml_name = f"{binder_dir.name}_monomer.yaml"
+            monomer_path = binder_dir / monomer_yaml_name
+            monomer_text = yaml_for_pair(
+                bseqs,
+                [],
+                partner_role="self",
+                use_msa_server=use_msa_server,
+                binder_msas=bmsas,
+                partner_msas=[],
+                binder_ligands=bligs,
+                partner_ligands=[],
+                cif_template=None,
+            )
+            write_text(monomer_path, monomer_text)
+            yaml_paths.append(monomer_path)
 
         # Loop over ALL partner entities (targets, antitargets, self)
         for tgt in targets_all:
