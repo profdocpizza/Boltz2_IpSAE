@@ -133,6 +133,7 @@ def yaml_for_pair(
     use_msa_server: bool,
     binder_msas: Optional[List[Optional[str]]] = None,
     partner_msas: Optional[List[Optional[str]]] = None,
+    cif_template: Optional[str] = None,
 ) -> str:
     """
     Build Boltz YAML for a binder–partner pair.
@@ -151,7 +152,7 @@ def yaml_for_pair(
     """
 
     lines: List[str] = ["version: 1", "sequences:"]
-
+    partner_ids = []
     binder_msas = binder_msas or [None] * len(binder_seqs)
     partner_msas = partner_msas or [None] * len(partner_seqs)
 
@@ -170,19 +171,26 @@ def yaml_for_pair(
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
-        
         msa_val = binder_msas[i] if i < len(binder_msas) else None
         _add_msa_field(msa_val)
 
     # --- Partner chains (TA/TB/... or AA/AB/...) ---
     for i, seq in enumerate(partner_seqs):
         cid = _partner_chain_id(partner_role, i)
+        partner_ids.append(cid)
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
-        
         msa_val = partner_msas[i] if i < len(partner_msas) else None
         _add_msa_field(msa_val)
+
+    # --- Global Templates Block ---
+    if cif_template and partner_role in ["target", "antitarget"] and cif_template is not None:
+        lines.append("templates:")
+        lines.append(f"  - cif: {cif_template}")
+        # Join IDs into a YAML list format [TA, TB, ...]
+        id_list = ", ".join(partner_ids)
+        lines.append(f"    chain_id: [{id_list}]")
 
     return "\n".join(lines) + "\n"
 
@@ -501,6 +509,9 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         name = sanitize_name(entry["name"])
         role = str(entry["role"]).lower()
+        # Extract and resolve CIF path
+        cif_raw = entry.get("cif_template")
+        cif_path = str(Path(cif_raw).resolve()) if cif_raw else None
         if role not in {"target", "antitarget", "self"}:
             raise ValueError(
                 f"Target {name}: invalid role {role!r} (expected 'target', 'antitarget', or 'self')."
@@ -514,7 +525,7 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "role": "self", 
                 "seqs": [], 
                 "msas": [], 
-                "_raw_entry_for_msa": entry
+                "_raw_entry_for_msa": entry,
             })
             continue
 
@@ -540,7 +551,7 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             raise ValueError(f"Target {name}: no sequences found.")
 
         msas = parse_chains_msa(entry, len(seqs))
-        result.append({"name": name, "role": role, "seqs": seqs, "msas": msas})
+        result.append({"name": name, "role": role, "seqs": seqs, "msas": msas, "cif_template": cif_path})
 
     if not result:
         raise ValueError("No targets/antitargets defined in config.")
@@ -613,6 +624,7 @@ def main():
 
             # --- SELF CASE ---
             if role == "self":
+                cif_tmp = None
                 partner_name = "self"
                 tseqs = bseqs[:]              # copy binder seqs
                 
@@ -653,14 +665,14 @@ def main():
                 tseqs = tgt["seqs"]
                 tmsas = tgt["msas"]
                 yaml_name = f"binder_{bname}_vs_target_{partner_name}.yaml"
-
+                cif_tmp = tgt.get("cif_template")
             # --- ANTITARGET ---
             elif role == "antitarget":
                 partner_name = tgt["name"]
                 tseqs = tgt["seqs"]
                 tmsas = tgt["msas"]
                 yaml_name = f"binder_{bname}_vs_antitarget_{partner_name}.yaml"
-
+                cif_tmp = tgt.get("cif_template")
             else:
                 raise ValueError(f"Unknown target role: {role}")
 
@@ -672,6 +684,7 @@ def main():
                 use_msa_server=use_msa_server,
                 binder_msas=bmsas,
                 partner_msas=tmsas,
+                cif_template=cif_tmp,
             )
             write_text(ypath, text)
             yaml_paths.append(ypath)
