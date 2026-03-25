@@ -33,3 +33,14 @@ a
     ```
 
 This will generate a plot of the results, which will be saved in the `boltz_validation/summary` directory.
+
+## Ligands in config
+
+You can add ligands directly in config entries:
+
+- `binders[*].ligand_ccd` / `binders[*].ligand_smiles`
+- `targets[*].ligand_ccd` / `targets[*].ligand_smiles` (only when `role` is `target` or `antitarget`)
+
+Each key accepts a single string or a list. Repeated ligand values are grouped into one Boltz ligand entity with multiple chain IDs (for example `id: [C, D]`).
+
+For `targets[*].role: self`, ligand keys are not allowed; self runs inherit ligands from the binder entry.

@@ -14,6 +14,7 @@ Key features:
         antitarget → AA, AB, AC, ...
         (fallback) → PA, PB, PC, ... if role is unknown
   - Supports multichain binders and multichain targets/antitargets.
+  - Supports ligands (CCD and/or SMILES) on binders and non-self targets.
   - MSA can be provided for any chain via config (chains_msa).
   - from_dir entries NEVER have MSAs (by design).
   - Uses 'target_' / 'antitarget_' prefixes in YAML names:
@@ -125,6 +126,80 @@ def _partner_chain_id(role: str, idx: int) -> str:
     return prefix + _alpha_suffix(idx)
 
 
+def _yaml_quote(value: str) -> str:
+    """Return a single-quoted YAML-safe scalar."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _allocate_ligand_chain_ids(count: int, used_ids: set) -> List[str]:
+    """
+    Allocate `count` chain IDs for ligands while avoiding `used_ids`.
+    Uses LA, LB, LC, ... (then LX26, LX27, ... for very large counts).
+    """
+    out: List[str] = []
+    idx = 0
+    while len(out) < count:
+        cid = "L" + _alpha_suffix(idx)
+        idx += 1
+        if cid in used_ids:
+            continue
+        out.append(cid)
+        used_ids.add(cid)
+    return out
+
+
+def _coerce_string_or_list(raw: Any, key_name: str, context: str) -> List[str]:
+    """Normalize scalar/list config value into a non-empty string list."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        raise ValueError(f"{context}: '{key_name}' must be a string or list of strings.")
+
+    out: List[str] = []
+    for v in values:
+        s = str(v).strip()
+        if not s:
+            raise ValueError(f"{context}: '{key_name}' contains an empty value.")
+        out.append(s)
+    return out
+
+
+def parse_ligands(entry: Dict[str, Any], context: str) -> List[Dict[str, str]]:
+    """
+    Parse ligand config keys and normalize into:
+      [{"kind": "ccd"|"smiles", "value": "<string>"}, ...]
+    Accepts singular/plural aliases for backwards compatibility.
+    """
+    ligands: List[Dict[str, str]] = []
+
+    ccd_values = []
+    ccd_values.extend(_coerce_string_or_list(entry.get("ligand_ccd"), "ligand_ccd", context))
+    ccd_values.extend(_coerce_string_or_list(entry.get("ligands_ccd"), "ligands_ccd", context))
+
+    smiles_values = []
+    smiles_values.extend(
+        _coerce_string_or_list(entry.get("ligand_smiles"), "ligand_smiles", context)
+    )
+    smiles_values.extend(
+        _coerce_string_or_list(entry.get("ligands_smiles"), "ligands_smiles", context)
+    )
+
+    for ccd in ccd_values:
+        ligands.append({"kind": "ccd", "value": ccd})
+    for smi in smiles_values:
+        ligands.append({"kind": "smiles", "value": smi})
+    return ligands
+
+
+def has_ligand_keys(entry: Dict[str, Any]) -> bool:
+    keys = {"ligand_ccd", "ligands_ccd", "ligand_smiles", "ligands_smiles"}
+    return any(k in entry for k in keys)
+
+
 
 def yaml_for_pair(
     binder_seqs: List[str],
@@ -133,6 +208,8 @@ def yaml_for_pair(
     use_msa_server: bool,
     binder_msas: Optional[List[Optional[str]]] = None,
     partner_msas: Optional[List[Optional[str]]] = None,
+    binder_ligands: Optional[List[Dict[str, str]]] = None,
+    partner_ligands: Optional[List[Dict[str, str]]] = None,
     cif_template: Optional[str] = None,
 ) -> str:
     """
@@ -153,8 +230,11 @@ def yaml_for_pair(
 
     lines: List[str] = ["version: 1", "sequences:"]
     partner_ids = []
+    used_chain_ids: set = set()
     binder_msas = binder_msas or [None] * len(binder_seqs)
     partner_msas = partner_msas or [None] * len(partner_seqs)
+    binder_ligands = binder_ligands or []
+    partner_ligands = partner_ligands or []
 
     # Helper
     def _add_msa_field(msa_opt: Optional[str]):
@@ -167,10 +247,11 @@ def yaml_for_pair(
 
     # --- Binder chains (A, B, ...) ---
     for i, seq in enumerate(binder_seqs):
-        cid = chr(ord("A") + i)
+        cid = _alpha_suffix(i)
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
+        used_chain_ids.add(cid)
         msa_val = binder_msas[i] if i < len(binder_msas) else None
         _add_msa_field(msa_val)
 
@@ -178,11 +259,37 @@ def yaml_for_pair(
     for i, seq in enumerate(partner_seqs):
         cid = _partner_chain_id(partner_role, i)
         partner_ids.append(cid)
+        used_chain_ids.add(cid)
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
         lines.append(f"      sequence: {seq}")
         msa_val = partner_msas[i] if i < len(partner_msas) else None
         _add_msa_field(msa_val)
+
+    # --- Ligands ---
+    all_ligands = binder_ligands + partner_ligands
+    if all_ligands:
+        ligand_ids = _allocate_ligand_chain_ids(len(all_ligands), used_chain_ids)
+
+        # Group repeated ligands into one entry with id: [C, D, ...]
+        grouped_ids: Dict[Tuple[str, str], List[str]] = {}
+        ligand_order: List[Tuple[str, str]] = []
+        for lig, cid in zip(all_ligands, ligand_ids):
+            key = (lig["kind"], lig["value"])
+            if key not in grouped_ids:
+                grouped_ids[key] = []
+                ligand_order.append(key)
+            grouped_ids[key].append(cid)
+
+        for key in ligand_order:
+            kind, value = key
+            ids = grouped_ids[key]
+            lines.append("  - ligand:")
+            if len(ids) == 1:
+                lines.append(f"      id: {ids[0]}")
+            else:
+                lines.append(f"      id: [{', '.join(ids)}]")
+            lines.append(f"      {kind}: {_yaml_quote(value)}")
 
     # --- Global Templates Block ---
     if cif_template and partner_role in ["target", "antitarget"] and cif_template is not None:
@@ -337,12 +444,14 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ValueError("Each binder entry must be a mapping.")
 
-        # Case: from_dir (renamed to from_fasta_dir)
-        if "from_fasta_dir" in entry:
-            dir_path = Path(entry["from_fasta_dir"]).resolve()
+        # Case: from_fasta_dir (from_dir kept as alias)
+        if "from_fasta_dir" in entry or "from_dir" in entry:
+            dir_raw = entry.get("from_fasta_dir", entry.get("from_dir"))
+            dir_path = Path(dir_raw).resolve()
             if not dir_path.is_dir():
-                raise ValueError(f"Binder from_fasta_dir not found: {dir_path}")
+                raise ValueError(f"Binder from_fasta_dir/from_dir not found: {dir_path}")
             addK = bool(entry.get("add_n_terminal_lysine", global_addK))
+            ligands = parse_ligands(entry, f"Binder directory {dir_path}")
             
             # Allow chains_msa even for from_fasta_dir (to set default MSA for all binders found)
             # We defer parsing until we know n_chains for each binder found.
@@ -355,7 +464,7 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 msas = parse_chains_msa(entry, len(seqs))
                 
                 result.append(
-                    {"name": sanitize_name(name), "seqs": seqs, "msas": msas}
+                    {"name": sanitize_name(name), "seqs": seqs, "msas": msas, "ligands": ligands}
                 )
             continue
             
@@ -376,6 +485,7 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     chains_to_keep = {str(c).strip() for c in raw_chains if str(c).strip()}
             
             addK = bool(entry.get("add_n_terminal_lysine", global_addK))
+            ligands = parse_ligands(entry, f"Binder structure directory {dir_path}")
 
             # Iterate over structures
             for struct_path in sorted(dir_path.glob("*")):
@@ -423,7 +533,7 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 msas = parse_chains_msa(entry, len(final_seqs))
                 
                 result.append(
-                    {"name": name, "seqs": final_seqs, "msas": msas}
+                    {"name": name, "seqs": final_seqs, "msas": msas, "ligands": ligands}
                 )
             continue
 
@@ -458,7 +568,8 @@ def build_binder_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             seqs = add_n_terminal_lysine(seqs)
 
         msas = parse_chains_msa(entry, len(seqs))
-        result.append({"name": name, "seqs": seqs, "msas": msas})
+        ligands = parse_ligands(entry, f"Binder {name}")
+        result.append({"name": name, "seqs": seqs, "msas": msas, "ligands": ligands})
 
     if not result:
         raise ValueError("No binders defined in config.")
@@ -487,8 +598,13 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             role = str(entry["role"]).lower()
             if role not in {"target", "antitarget", "self"}:
                 raise ValueError(
-                    f"Target {name}: invalid role {role!r} (expected 'target', 'antitarget', or 'self')."
+                    f"Target from_dir entry has invalid role {role!r} (expected 'target', 'antitarget', or 'self')."
                 )
+            if role == "self" and has_ligand_keys(entry):
+                raise ValueError(
+                    "targets[from_dir] with role 'self' cannot define ligands; define binder ligands under binders."
+                )
+            ligands = parse_ligands(entry, f"targets[from_dir] role={role}")
 
             dir_path = Path(entry["from_dir"]).resolve()
             if not dir_path.is_dir():
@@ -497,7 +613,13 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # from_dir entries: explicitly NO MSAs
                 msas = [None] * len(seqs)
                 result.append(
-                    {"name": sanitize_name(name), "role": role, "seqs": seqs, "msas": msas}
+                    {
+                        "name": sanitize_name(name),
+                        "role": role,
+                        "seqs": seqs,
+                        "msas": msas,
+                        "ligands": ligands,
+                    }
                 )
             continue
 
@@ -517,6 +639,10 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"Target {name}: invalid role {role!r} (expected 'target', 'antitarget', or 'self')."
             )
         if role == "self":
+            if has_ligand_keys(entry):
+                raise ValueError(
+                    f"Target {name}: role 'self' cannot define ligands; define binder ligands under binders."
+                )
             # For self, we need to capture chains_msa config if present, 
             # effectively deferring msa resolution until we know the binder.
             # We store the raw 'entry' dict to parse later.
@@ -525,6 +651,7 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "role": "self", 
                 "seqs": [], 
                 "msas": [], 
+                "ligands": [],
                 "_raw_entry_for_msa": entry,
             })
             continue
@@ -551,7 +678,17 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             raise ValueError(f"Target {name}: no sequences found.")
 
         msas = parse_chains_msa(entry, len(seqs))
-        result.append({"name": name, "role": role, "seqs": seqs, "msas": msas, "cif_template": cif_path})
+        ligands = parse_ligands(entry, f"Target {name}")
+        result.append(
+            {
+                "name": name,
+                "role": role,
+                "seqs": seqs,
+                "msas": msas,
+                "ligands": ligands,
+                "cif_template": cif_path,
+            }
+        )
 
     if not result:
         raise ValueError("No targets/antitargets defined in config.")
@@ -611,6 +748,7 @@ def main():
         bname = binder["name"]
         bseqs = binder["seqs"]
         bmsas = binder["msas"]
+        bligs = binder.get("ligands", [])
 
         binder_dir = output_root / f"binder_{bname}"
         binder_dir.mkdir(parents=True, exist_ok=True)
@@ -627,6 +765,7 @@ def main():
                 cif_tmp = None
                 partner_name = "self"
                 tseqs = bseqs[:]              # copy binder seqs
+                tligs: List[Dict[str, str]] = []
                 
                 # If the self entry defines chains_msa, use it.
                 # Otherwise, fallback to binder's own MSAs (default behavior).
@@ -664,6 +803,7 @@ def main():
                 partner_name = tgt["name"]
                 tseqs = tgt["seqs"]
                 tmsas = tgt["msas"]
+                tligs = tgt.get("ligands", [])
                 yaml_name = f"binder_{bname}_vs_target_{partner_name}.yaml"
                 cif_tmp = tgt.get("cif_template")
             # --- ANTITARGET ---
@@ -671,6 +811,7 @@ def main():
                 partner_name = tgt["name"]
                 tseqs = tgt["seqs"]
                 tmsas = tgt["msas"]
+                tligs = tgt.get("ligands", [])
                 yaml_name = f"binder_{bname}_vs_antitarget_{partner_name}.yaml"
                 cif_tmp = tgt.get("cif_template")
             else:
@@ -684,6 +825,8 @@ def main():
                 use_msa_server=use_msa_server,
                 binder_msas=bmsas,
                 partner_msas=tmsas,
+                binder_ligands=bligs,
+                partner_ligands=tligs,
                 cif_template=cif_tmp,
             )
             write_text(ypath, text)

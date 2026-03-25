@@ -20,6 +20,12 @@ binders:
     chains_msa:
       0: empty
       1: empty
+    # Optional binder-side ligands (applied to target/antitarget/self runs)
+    ligand_ccd:
+      - ZN
+      - ZN
+    # ligand_smiles:
+    #   - "CCO"
 targets:
   - name: nipah_g
     role: target
@@ -27,6 +33,11 @@ targets:
       - QNYTRSTDNQAVIKDALQGIQQQIKGLADKIGTEIGPKVSLIDTSSTITIPANIGLLGSKISQSTASINENVNEKCKFTLPPLKIHECNISCPNPLPFREYRPQTEGVSNLVGLPNNICLQKTSNQILKPKLISYTLPVVGQSGTCITDPLLAMDEGYFAYSHLERIGSCSRGVSKQRIIGVGEVLDRGDEVPSLFMTNVWTPPNPNTVYHCSAVYNNEFYYVLCAVSTVGDPILNSTYWSGSLMMTRLAVKPKSNGGGYNQHQLALRSIEKGRYDKVMPYGPSGIKQGDTLYFPAVGFLVRTEFKYNDSNCPITKCQYSKPENCRLSMGIRPNSHYILRSGLLKYNLSDGENPKVVFIEISDQRLSIGSPSKIYDSLGQPVFYQASFSWDTMIKFGDVLTVNPLVVNWRNNTVISRPGQSQCPRFNTCPEICWEGVYNDAFLIDRINWISAGVFLDSNQTAENPVFTVFKDNEILYRAQLASEDTNAQKTITNCFLLKNKIWCISLVEIYDTGDNVIRPKLFAVKIPEQCT
     chains_msa:
       0: nipah.a3m
+    # Optional target-side ligands (only for role: target/antitarget)
+    ligand_ccd:
+      - ATP
+    # ligand_smiles:
+    #   - "C1=CC=CC=C1"
     # cif_template: path_to_cif_template/target.cif
       
   - name: Sialidase_2F29
@@ -36,6 +47,8 @@ targets:
     # cif_template: path_to_cif_template/target.cif
   - name: self
     role: self
+    # role: self must not define ligand_ccd/ligand_smiles;
+    # self ligands come from the binder entry.
     chains_msa:
       0: empty
       1: empty
