@@ -28,7 +28,8 @@ This script:
         - model_idx
         - numeric ipSAE metrics (_min, _max)
   * makes per-binder stripplots (all targets & antitargets together)
-  * makes global heatmaps (ipSAE_min, ipSAE_max) averaged across models
+  * makes global heatmaps (ipSAE_min, ipSAE_max)
+  * writes summary/aggregated.csv with binder/partner-level aggregated metrics
 """
 
 import argparse
@@ -36,7 +37,9 @@ import re
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 
 def classify(chain_id):
@@ -230,6 +233,151 @@ def parse_vs_name(vs_name: str):
     return vs_name, "unknown"
 
 
+def _is_binder_chain(chain_id: str) -> bool:
+    return len(chain_id) == 1 and chain_id.isupper()
+
+
+def _extract_binder_ca_coords(cif_path: Path) -> Dict[Tuple[str, int], np.ndarray]:
+    """
+    Extract binder-chain CA coordinates from mmCIF.
+    Binder chains are single-letter uppercase IDs (A, B, ...).
+    """
+    lines = cif_path.read_text(encoding="utf-8").splitlines()
+
+    atom_header_start = None
+    for i, line in enumerate(lines):
+        if line.strip() == "_atom_site.group_PDB":
+            atom_header_start = i
+            break
+    if atom_header_start is None:
+        return {}
+
+    headers: List[str] = []
+    j = atom_header_start
+    while j < len(lines) and lines[j].strip().startswith("_atom_site."):
+        headers.append(lines[j].strip().split(".", 1)[1])
+        j += 1
+
+    idx = {h: i for i, h in enumerate(headers)}
+    required = [
+        "label_atom_id",
+        "label_asym_id",
+        "label_seq_id",
+        "Cartn_x",
+        "Cartn_y",
+        "Cartn_z",
+    ]
+    if any(r not in idx for r in required):
+        return {}
+
+    coords: Dict[Tuple[str, int], np.ndarray] = {}
+    for k in range(j, len(lines)):
+        stripped = lines[k].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            break
+        if stripped.startswith("loop_") or stripped.startswith("_"):
+            break
+
+        fields = stripped.split()
+        if len(fields) < len(headers):
+            continue
+
+        chain_id = fields[idx["label_asym_id"]]
+        if not _is_binder_chain(chain_id):
+            continue
+
+        atom_name = fields[idx["label_atom_id"]]
+        if atom_name != "CA":
+            continue
+
+        seq_raw = fields[idx["label_seq_id"]]
+        if seq_raw in {".", "?"}:
+            continue
+        try:
+            seq_id = int(seq_raw)
+            x = float(fields[idx["Cartn_x"]])
+            y = float(fields[idx["Cartn_y"]])
+            z = float(fields[idx["Cartn_z"]])
+        except ValueError:
+            continue
+
+        key = (chain_id, seq_id)
+        if key not in coords:
+            coords[key] = np.array([x, y, z], dtype=float)
+
+    return coords
+
+
+def _kabsch_rmsd(mobile: np.ndarray, reference: np.ndarray) -> float:
+    """RMSD after optimal rigid-body superposition (Kabsch)."""
+    mob_centered = mobile - mobile.mean(axis=0)
+    ref_centered = reference - reference.mean(axis=0)
+
+    cov = mob_centered.T @ ref_centered
+    u, _s, vt = np.linalg.svd(cov)
+    rot = vt.T @ u.T
+    if np.linalg.det(rot) < 0:
+        vt[-1, :] *= -1
+        rot = vt.T @ u.T
+
+    mob_aligned = mob_centered @ rot
+    return float(np.sqrt(np.mean(np.sum((mob_aligned - ref_centered) ** 2, axis=1))))
+
+
+def binder_ca_rmsd(
+    complex_cif: Path,
+    monomer_cif: Path,
+    coord_cache: Optional[Dict[Path, Dict[Tuple[str, int], np.ndarray]]] = None,
+) -> Optional[float]:
+    """Compute binder CA RMSD (complex vs monomer). Returns None if unmatched."""
+    cache = coord_cache if coord_cache is not None else {}
+    if complex_cif not in cache:
+        cache[complex_cif] = _extract_binder_ca_coords(complex_cif)
+    if monomer_cif not in cache:
+        cache[monomer_cif] = _extract_binder_ca_coords(monomer_cif)
+
+    coords_complex = cache[complex_cif]
+    coords_monomer = cache[monomer_cif]
+    common_keys = sorted(set(coords_complex) & set(coords_monomer))
+    if not common_keys:
+        return None
+
+    p = np.vstack([coords_complex[k] for k in common_keys])
+    q = np.vstack([coords_monomer[k] for k in common_keys])
+    return _kabsch_rmsd(p, q)
+
+
+def find_monomer_model_cifs(binder_dir: Path) -> List[Path]:
+    """
+    Locate binder monomer model CIFs for a binder directory.
+    Expected naming:
+      <binder_dir.name>_monomer.yaml ->
+      outputs/boltz_results_<binder_dir.name>_monomer/predictions/<binder_dir.name>_monomer/*_model_*.cif
+    """
+    monomer_stem = f"{binder_dir.name}_monomer"
+    pred_root = (
+        binder_dir
+        / "outputs"
+        / f"boltz_results_{monomer_stem}"
+        / "predictions"
+        / monomer_stem
+    )
+    if not pred_root.is_dir():
+        return []
+
+    out: List[Tuple[int, Path]] = []
+    for cif_path in pred_root.glob(f"{monomer_stem}_model_*.cif"):
+        m = re.search(r"model_(\d+)", cif_path.name)
+        if not m:
+            continue
+        out.append((int(m.group(1)), cif_path))
+
+    out.sort(key=lambda x: x[0])
+    return [p for _, p in out]
+
+
 
 def analyse_binder(binder_dir: Path ,args):
     """
@@ -239,6 +387,16 @@ def analyse_binder(binder_dir: Path ,args):
     plots_dir.mkdir(exist_ok=True)
 
     binder_records = []
+    coord_cache: Dict[Path, Dict[Tuple[str, int], np.ndarray]] = {}
+    monomer_model_cifs: List[Path] = []
+
+    if args.rmsd_to_binder_monomer:
+        monomer_model_cifs = find_monomer_model_cifs(binder_dir)
+        if not monomer_model_cifs:
+            print(
+                f"⚠️ Monomer prediction files not found for {binder_dir.name}; "
+                "RMSD_to_binder_monomer will be empty."
+            )
 
     for vs_dir in (binder_dir / "outputs").glob("boltz_results_*vs*"):
         vs_name = vs_dir.name.replace("boltz_results_", "")
@@ -290,6 +448,17 @@ def analyse_binder(binder_dir: Path ,args):
                 "partner": partner_name,
                 "target_type": target_type,
             })
+
+            if args.rmsd_to_binder_monomer:
+                rmsd_values = []
+                for monomer_cif in monomer_model_cifs:
+                    rmsd = binder_ca_rmsd(cif_file, monomer_cif, coord_cache=coord_cache)
+                    if rmsd is not None:
+                        rmsd_values.append(rmsd)
+                rec["RMSD_to_binder_monomer"] = (
+                    float(np.mean(rmsd_values)) if rmsd_values else float("nan")
+                )
+
             binder_records.append(rec)
 
     if not binder_records:
@@ -399,11 +568,6 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
         dfs.append(df)
 
     all_df = pd.concat(dfs, ignore_index=True)
-    binder_sequences = all_df.groupby("binder_short")["binder_sequence"].first().to_dict()
-
-
-    # Add the binder_sequence column
-    all_df["binder_sequence"] = all_df["binder_short"].map(binder_sequences)
 
     metrics = [m for m in ["ipSAE_min", "ipSAE_max"] if m in all_df.columns]
     if not metrics:
@@ -417,30 +581,77 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
     all_df.to_csv(all_df_path, index=False)
     print(f"Saved combined ipSAE data at {all_df_path}")
 
+    # Remove legacy per-metric heatmap CSVs so only aggregated.csv is kept.
+    for legacy_name in ("ipSAE_min_heatmap.csv", "ipSAE_max_heatmap.csv"):
+        legacy_path = root_dir / "summary" / legacy_name
+        if legacy_path.exists():
+            legacy_path.unlink()
+            print(f"Removed legacy output: {legacy_path}")
+
     # ------------------------------------------------------
     # AGGREGATION ACROSS MODELS
     # ------------------------------------------------------
-    if use_best_model and "ipSAE_min" in all_df.columns:
-        # pick the row (i.e. model) with lowest ipSAE_min per binder/partner
-        idx = all_df.groupby(["binder_short", "partner"])["ipSAE_min"].idxmax()
-        agg_base = all_df.loc[idx].copy()   # still has target_type
+    group_cols = ["binder_short", "partner"]
+    if use_best_model:
+        if "ipSAE_max" in all_df.columns:
+            best_metric = "ipSAE_max"
+        elif "ipSAE_min" in all_df.columns:
+            best_metric = "ipSAE_min"
+        else:
+            best_metric = None
+
+        if best_metric is None:
+            print("No ipSAE metric available for --use_best_model; falling back to mean aggregation.")
+            agg_base = all_df.copy()
+            aggregation_mode = "mean_over_models"
+        else:
+            idx = all_df.groupby(group_cols)[best_metric].idxmax()
+            agg_base = all_df.loc[idx].copy()
+            aggregation_mode = f"best_model_by_{best_metric}"
     else:
-        # use all rows as base for ordering & averaging
         agg_base = all_df.copy()
+        aggregation_mode = "mean_over_models"
 
+    # Build a single aggregated table with all numeric metrics.
+    numeric_cols = agg_base.select_dtypes(include=[np.number]).columns.tolist()
+    numeric_cols = [c for c in numeric_cols if c != "model_idx"]
+    agg_numeric = agg_base.groupby(group_cols, as_index=False)[numeric_cols].mean()
 
+    meta_cols = [
+        c for c in ["binder", "binder_sequence", "target_type", "target_sequence"]
+        if c in agg_base.columns
+    ]
+    agg_meta = agg_base.groupby(group_cols, as_index=False)[meta_cols].first()
+    agg = agg_meta.merge(agg_numeric, on=group_cols, how="left")
 
-    # This is what we actually plot (average across models or best-model rows)
-    agg = agg_base.groupby(["binder_short", "partner"])[metrics].mean().reset_index()
+    if "model_idx" in all_df.columns:
+        if use_best_model:
+            model_info = (
+                agg_base.groupby(group_cols, as_index=False)["model_idx"]
+                .first()
+                .rename(columns={"model_idx": "selected_model_idx"})
+            )
+            agg = agg.merge(model_info, on=group_cols, how="left")
+        else:
+            model_info = (
+                all_df.groupby(group_cols, as_index=False)["model_idx"]
+                .agg(
+                    model_count="nunique",
+                    model_indices=lambda x: ",".join(map(str, sorted(set(x.astype(int)))))
+                )
+            )
+            agg = agg.merge(model_info, on=group_cols, how="left")
+
+    agg["aggregation_mode"] = aggregation_mode
+    aggregated_out = root_dir / "summary" / "aggregated.csv"
+    agg.to_csv(aggregated_out, index=False, float_format="%.5f")
+    print(f"Saved aggregated data at {aggregated_out}")
 
     # ------------------------------------------------------
     # ORDER BY BEST BINDING TO TARGET (LOWEST ipSAE_min)
     # ------------------------------------------------------
     # Use only true targets (NOT antitargets) to measure "binding quality"
     targets_only = agg_base[agg_base["target_type"] == "target"]
-
-    # If for some reason no targets exist, fall back to all partners
-    source = targets_only if not targets_only.empty else agg_base
 
     # Binders ordered by highest ipSAE_min (bigger = better)
     binder_order = (
@@ -450,14 +661,6 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
         .index
         .tolist()
     )
-
-    # Do NOT reorder rows (targets/antitargets)
-    type_map = agg_base.groupby("partner")["target_type"].first().to_dict()
-
-    # partner_order = antitargets + targets + self_group
-    partner_order = ["self", "target", "antitarget"]
-
-    print("Partner order:", partner_order)
 
     # Optional: print to verify in logs
     print("Binder order (best→worst by ipSAE_min on targets):", binder_order,"\n")
@@ -526,24 +729,6 @@ def plot_overall(root_dir: Path, use_best_model: bool = False):
             print(f"Saved heatmap for {metric} at {path}")
         plt.close()
 
-        # save CSV (rows = binders, columns = targets)
-        csv_out = root_dir/ "summary"  / f"{metric}_heatmap.csv"
-
-        # Add binder_sequence to the final exported heatmap CSV
-        # ----------------------------------------------------------
-        pivot_out = pivot.T.copy()  # rows = binders
-
-        pivot_out.insert(
-            0,
-            "binder_sequence",
-            pivot_out.index.map(binder_sequences)
-        )
-
-
-        pivot_out.to_csv(csv_out, float_format="%.5f")
-
-        print(f"Saved heatmap data for {metric} as {csv_out}")
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ipsae_e", type=int, default=15,
@@ -557,6 +742,11 @@ def main():
         "--use_best_model",
         action="store_true",
         help="Use only the best model (highest ipSAE_max) per binder/partner instead of averaging"
+    )
+    ap.add_argument(
+        "--rmsd_to_binder_monomer",
+        action="store_true",
+        help="Compute RMSD_to_binder_monomer using binder-only monomer predictions",
     )
     ap.add_argument("--num_cpu", type=int, default=1,
                     help="Number of CPUs for parallel processing")
