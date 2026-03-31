@@ -32,7 +32,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 from str2fasta import get_sequences_all_chains
 import yaml
 
@@ -200,6 +200,94 @@ def has_ligand_keys(entry: Dict[str, Any]) -> bool:
     return any(k in entry for k in keys)
 
 
+def _warn_template_parse_failure(cif_path: Path, context: str, details: str) -> None:
+    """Emit a non-fatal warning for template CIF precheck failures."""
+    print(
+        f"⚠ {context}: Boltz may fail to parse template CIF: {cif_path}\n"
+        f"   Details: {details}\n"
+        "   Recommendation: convert PDB to mmCIF with "
+        "https://mmcif.pdbj.org/converter/index.php?l=en"
+    )
+
+
+def _exc_summary(exc: BaseException) -> str:
+    """Compact exception summary with type and repr for empty-message exceptions."""
+    return f"{type(exc).__name__}: {exc!r}"
+
+
+def _precheck_template_cif(
+    cif_path: Optional[str], context: str, checked_paths: Set[Path]
+) -> None:
+    """
+    Precheck template CIF parseability before generating YAML.
+
+    Strategy:
+      1) Try Boltz parser directly (best predictor of runtime behavior).
+      2) If unavailable/failing, fall back to a basic Gemmi structural sanity check.
+      3) Emit warning (non-fatal) when parseability looks problematic.
+    """
+    if not cif_path:
+        return
+
+    path = Path(cif_path).resolve()
+    if path in checked_paths:
+        return
+    checked_paths.add(path)
+
+    if not path.is_file():
+        raise ValueError(f"{context}: cif_template file not found: {path}")
+
+    boltz_error: Optional[Exception] = None
+    boltz_checked = False
+
+    try:
+        from boltz.data.mol import load_canonicals
+        from boltz.data.parse.mmcif import parse_mmcif
+
+        mol_dir = Path.home() / ".boltz" / "mols"
+        ccd = load_canonicals(mol_dir)
+        parse_mmcif(
+            path,
+            mols=ccd,
+            moldir=mol_dir,
+            use_assembly=False,
+            compute_interfaces=False,
+        )
+        return
+    except Exception as e:
+        boltz_checked = True
+        boltz_error = e
+
+    try:
+        import gemmi
+
+        doc = gemmi.cif.read_file(str(path))
+        block = doc.sole_block()
+        structure = gemmi.make_structure_from_block(block)
+        if len(structure) == 0:
+            raise ValueError("Gemmi found 0 models in the CIF.")
+        if len(structure[0]) == 0:
+            raise ValueError("Gemmi found no chains in model 0.")
+    except Exception as gemmi_error:
+        if boltz_checked:
+            details = (
+                f"Boltz parser check failed ({_exc_summary(boltz_error)}); "
+                f"Gemmi check failed ({_exc_summary(gemmi_error)})."
+            )
+        else:
+            details = f"Gemmi check failed ({_exc_summary(gemmi_error)})."
+        _warn_template_parse_failure(path, context, details)
+        return
+
+    # Gemmi passed but Boltz failed: still warn, this is the common real-world failure mode.
+    if boltz_checked:
+        details = (
+            f"Boltz parser check failed ({_exc_summary(boltz_error)}), although Gemmi basic check passed. "
+            "Boltz may still reject this CIF."
+        )
+        _warn_template_parse_failure(path, context, details)
+
+
 
 def yaml_for_pair(
     binder_seqs: List[str],
@@ -229,7 +317,6 @@ def yaml_for_pair(
     """
 
     lines: List[str] = ["version: 1", "sequences:"]
-    partner_ids = []
     used_chain_ids: set = set()
     binder_msas = binder_msas or [None] * len(binder_seqs)
     partner_msas = partner_msas or [None] * len(partner_seqs)
@@ -258,7 +345,6 @@ def yaml_for_pair(
     # --- Partner chains (TA/TB/... or AA/AB/...) ---
     for i, seq in enumerate(partner_seqs):
         cid = _partner_chain_id(partner_role, i)
-        partner_ids.append(cid)
         used_chain_ids.add(cid)
         lines.append("  - protein:")
         lines.append(f"      id: {cid}")
@@ -295,9 +381,6 @@ def yaml_for_pair(
     if cif_template and partner_role in ["target", "antitarget"] and cif_template is not None:
         lines.append("templates:")
         lines.append(f"  - cif: {cif_template}")
-        # Join IDs into a YAML list format [TA, TB, ...]
-        id_list = ", ".join(partner_ids)
-        lines.append(f"    chain_id: [{id_list}]")
 
     return "\n".join(lines) + "\n"
 
@@ -608,6 +691,8 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     result: List[Dict[str, Any]] = []
 
+    checked_template_paths: Set[Path] = set()
+
     for entry in targets_cfg:
         if not isinstance(entry, dict):
             raise ValueError("Each targets entry must be a mapping.")
@@ -655,6 +740,7 @@ def build_target_entities(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Extract and resolve CIF path
         cif_raw = entry.get("cif_template")
         cif_path = str(Path(cif_raw).resolve()) if cif_raw else None
+        _precheck_template_cif(cif_path, f"Target {name}", checked_template_paths)
         if role not in {"target", "antitarget", "self"}:
             raise ValueError(
                 f"Target {name}: invalid role {role!r} (expected 'target', 'antitarget', or 'self')."

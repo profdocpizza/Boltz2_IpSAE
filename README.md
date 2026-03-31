@@ -45,6 +45,16 @@ Each key accepts a single string or a list. Repeated ligand values are grouped i
 
 For `targets[*].role: self`, ligand keys are not allowed; self runs inherit ligands from the binder entry.
 
+## Template CIF behavior
+
+- If `targets[*].cif_template` is set, generated Boltz YAML now includes only:
+  - `templates:`
+  - `- cif: /path/to/template.cif`
+- `chain_id` is intentionally not written, so Boltz auto-selects/matches template chains.
+- During config parsing, the script performs an early CIF precheck (Boltz parser when available, with Gemmi fallback).
+- If the template looks unparsable for Boltz, a warning is printed with this recommendation:
+  - https://mmcif.pdbj.org/converter/index.php?l=en
+
 ## Optional monomer RMSD column
 
 Set `visualisation.RMSD_to_binder_monomer: true` to:
