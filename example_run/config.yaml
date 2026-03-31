@@ -14,6 +14,7 @@ visualisation:
   ipsae_distance_threshold: 15
   use_best_model: false # plots avg across all models if false
   num_cpu: 50
+  RMSD_to_binder_monomer: false
 
 binders:
   - from_dir: binders/
