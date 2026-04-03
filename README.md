@@ -95,10 +95,10 @@ targets:                                                # Required. List of targ
 **Targets:**
 - Must define sequences via exactly ONE method: `sequences`, `fasta`, or `from_dir`
 - `role` is required and must be one of: `target`, `antitarget`, `self`
-- `role: self` creates a binder-only monomer prediction; it ignores any `sequences`, `fasta`, `from_dir` values (uses binder's sequences)
+- `role: self` mirrors the binder against itself; it ignores any `sequences`, `fasta`, `from_dir` values (uses binder's sequences on both sides)
 - `cif_template` is optional and recommended for known complexes; it helps guide structure prediction
 - Ligands (`ligand_ccd`, `ligand_smiles`) are allowed ONLY for `role: target` or `role: antitarget`
-  - `role: self` cannot define ligands; self runs inherit ligand info from the binder entry
+  - `role: self` cannot define ligands; self runs duplicate the binder ligands onto both mirrored sides
 
 **Global Options:**
 - `use_msa_server` must be the string `"true"` or `"false"` (not a boolean)
@@ -243,10 +243,11 @@ Ligands can be added to binders and targets via the config file (see **Configura
 - `binders[*].ligand_ccd` - PDB chemical component codes (single string or list)
 - `binders[*].ligand_smiles` - SMILES strings (single string or list)
 - Ligands defined here are applied to all target/antitarget/self runs with this binder
+  - For `role: self`, the binder ligands are duplicated so both mirrored copies of the binder carry them
 
 **For targets:**
 - `targets[*].ligand_ccd` / `targets[*].ligand_smiles` - **only allowed for `role: target` or `role: antitarget`**
-- **Not allowed for `role: self`** - self runs inherit ligands from the binder entry
+- **Not allowed for `role: self`** - self runs duplicate ligands from the binder entry instead
 
 **Behavior:**
 - Each key accepts a single string or a list of strings

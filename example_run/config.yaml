@@ -49,7 +49,7 @@ targets:
   - name: self
     role: self
     # role: self must not define ligand_ccd/ligand_smiles;
-    # self ligands come from the binder entry.
+    # binder ligands are duplicated onto both mirrored sides.
     chains_msa:
       0: empty
       1: empty

@@ -896,7 +896,8 @@ def main():
                 cif_tmp = None
                 partner_name = "self"
                 tseqs = bseqs[:]              # copy binder seqs
-                tligs: List[Dict[str, str]] = []
+                # Self runs mirror the binder on the partner side, including ligands.
+                tligs = bligs[:]
                 
                 # If the self entry defines chains_msa, use it.
                 # Otherwise, fallback to binder's own MSAs (default behavior).
