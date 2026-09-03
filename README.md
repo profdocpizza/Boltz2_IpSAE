@@ -221,11 +221,16 @@ targets:
     python ../make_binder_validation_scripts.py --config config.yaml
     ```
 
-4.  **Run all co-folding validation scripts with a single script**
+4.  **Run all co-folding validation jobs with a single hot Boltz worker**
 
     ```bash
     ./boltz_validation/run_all_cofolding.sh
     ```
+
+    The generated launcher starts one Boltz2 process, loads the model once,
+    and executes all binder YAMLs serially on the GPU. Existing completed
+    predictions are skipped. The per-binder `run.sh` files remain available
+    for isolated runs, but each of those launches Boltz independently.
 
 5.  **When co-folding is done, visualize the results:**
 

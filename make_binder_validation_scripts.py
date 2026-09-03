@@ -23,13 +23,14 @@ Key features:
   - Generates:
        - Per-binder YAMLs for all binder–(anti)target pairs
        - Per-binder run.sh
-       - Global run_all_cofolding.sh
+       - Global run_all_cofolding.sh using one persistent Boltz worker
        - Visualization helper script
 """
 
 import argparse
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -409,20 +410,39 @@ def make_run_sh(
     os.chmod(run_path, 0o755)
 
 
-def make_master_run_sh(output_root: Path) -> None:
-    """Generate top-level script to run all binder run.sh scripts with paths relative to the script itself."""
+def make_master_run_sh(
+    output_root: Path,
+    recycling_steps: Optional[int],
+    diffusion_samples: Optional[int],
+    use_msa_server: bool,
+) -> None:
+    """Generate the serial hot-worker launcher for all binder YAMLs."""
+    worker_path = Path(__file__).resolve().with_name("hot_boltz_worker.py")
+    command = [
+        "python",
+        "-u",
+        str(worker_path),
+        "--output-root",
+        '"$DIR"',
+    ]
+    if recycling_steps is not None:
+        command += ["--recycling-steps", str(recycling_steps)]
+    if diffusion_samples is not None:
+        command += ["--diffusion-samples", str(diffusion_samples)]
+    if use_msa_server:
+        command.append("--use-msa-server")
+    command_text = " ".join(
+        '"$DIR"' if part == '"$DIR"' else shlex.quote(part) for part in command
+    )
     lines = [
         "#!/bin/bash",
-        "set -e",
+        "set -euo pipefail",
         "",
-        '# Determine directory of this script',
+        "# Determine directory of this script",
         'DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"',
         "",
-        "# Run all binder_* run.sh scripts relative to script location",
-        'for f in $(find "$DIR" -type f -name "run.sh" | sort); do',
-        '  echo "Running $f..."',
-        '  (cd "$(dirname "$f")" && bash run.sh)',
-        "done",
+        "# One persistent Boltz2 process executes all YAML jobs serially.",
+        command_text,
         "",
     ]
     run_all_path = output_root / "run_all_cofolding.sh"
@@ -972,7 +992,12 @@ def main():
             use_msa_server=use_msa_server,
         )
 
-    make_master_run_sh(output_root)
+    make_master_run_sh(
+        output_root,
+        recycling_steps=recycling_steps,
+        diffusion_samples=diffusion_samples,
+        use_msa_server=use_msa_server,
+    )
     make_visualisation_sh(output_root, cfg)
 
     print(f"\n✅ Done. YAMLs and scripts written under: {output_root}\n")
